@@ -215,6 +215,38 @@ body::before {
 .spin { display: inline-block; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* Size preview */
+.size-preview-setting { min-width: 180px; }
+.size-preview-wrap { display: flex; flex-direction: column; gap: 8px; }
+.size-bar-track {
+  position: relative; height: 6px;
+  background: var(--surface2); border-radius: 3px; overflow: visible;
+  width: 100%; min-width: 160px;
+}
+.size-bar-fill {
+  height: 100%; border-radius: 3px; width: 0%;
+  background: var(--green);
+  transition: width 0.3s ease, background 0.3s ease;
+  max-width: 100%;
+}
+.size-bar-fill.warn  { background: #ffb400; }
+.size-bar-fill.over  { background: var(--accent); }
+.size-bar-limit {
+  position: absolute; top: -3px; right: 0;
+  width: 2px; height: 12px;
+  background: var(--border-hover); border-radius: 1px;
+}
+.size-preview-nums {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+}
+.size-preview-val {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 700;
+  color: var(--green); transition: color 0.3s;
+}
+.size-preview-val.warn { color: #ffb400; }
+.size-preview-val.over { color: var(--accent); }
+.size-preview-limit { font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+
 .empty-hint {
   text-align: center; padding: 48px 24px;
   color: var(--text-dim); font-size: 14px; line-height: 1.8;
@@ -265,13 +297,14 @@ body::before {
         <option value="5">5 seconds</option>
         <option value="10" selected>10 seconds</option>
         <option value="15">15 seconds</option>
+        <option value="30">30 seconds</option>
       </select>
     </div>
     <div class="setting">
       <span class="setting-label">FPS</span>
       <select id="setting-fps">
         <option value="8">8 fps — smaller</option>
-        <option value="12" selected>12 fps — balanced</option>
+        <option value="12" selected>12 fps — default</option>
         <option value="18">18 fps — smoother</option>
       </select>
     </div>
@@ -279,8 +312,8 @@ body::before {
       <span class="setting-label">Width (px)</span>
       <select id="setting-width">
         <option value="320">320px — small</option>
-        <option value="480" selected>480px — medium</option>
-        <option value="640">640px — large</option>
+        <option value="480">480px — medium</option>
+        <option value="720" selected>720px — HD</option>
       </select>
     </div>
     <div class="setting">
@@ -290,6 +323,19 @@ body::before {
         <span class="setting-val" id="quality-val">10</span>
       </div>
       <span style="font-size:10px;color:var(--text-dim)">1 = best, 20 = fastest</span>
+    </div>
+    <div class="setting size-preview-setting">
+      <span class="setting-label">Est. file size</span>
+      <div class="size-preview-wrap">
+        <div class="size-bar-track">
+          <div class="size-bar-fill" id="size-bar-fill"></div>
+          <div class="size-bar-limit"></div>
+        </div>
+        <div class="size-preview-nums">
+          <span class="size-preview-val" id="size-preview-val">—</span>
+          <span class="size-preview-limit">/ 50 MB max</span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -345,6 +391,8 @@ var procVideo = document.getElementById('proc-video');
 var procCanvas= document.getElementById('proc-canvas');
 
 // ─── Settings ─────────────────────────────────────────────────────────────
+var MAX_SIZE_BYTES = 50 * 1024 * 1024; // 50MB hard cap
+
 function getSettings() {
   return {
     duration: parseInt(document.getElementById('setting-duration').value),
@@ -353,9 +401,63 @@ function getSettings() {
     quality:  parseInt(document.getElementById('setting-quality').value)
   };
 }
+
+// Estimate GIF size in bytes: width * height * fps * duration * bytes_per_pixel_compressed
+function estimateSize(settings) {
+  var aspect = 16/9;
+  var height = Math.round(settings.width / aspect);
+  var frames = settings.duration * settings.fps;
+  // empirical: ~0.5 bytes per pixel per frame after LZW at quality 10
+  return settings.width * height * frames * 0.5;
+}
+
+// Auto-reduce settings to fit under 50MB, returns adjusted settings
+function fitSettings(settings) {
+  var s = Object.assign({}, settings);
+  var attempts = 0;
+  while (estimateSize(s) > MAX_SIZE_BYTES && attempts < 20) {
+    // Priority: reduce fps first, then width, then duration
+    if (s.fps > 8) { s.fps = 8; }
+    else if (s.width > 480) { s.width = 480; }
+    else if (s.width > 320) { s.width = 320; }
+    else if (s.duration > 15) { s.duration = 15; }
+    else if (s.duration > 10) { s.duration = 10; }
+    else if (s.duration > 5) { s.duration = 5; }
+    else { s.quality = Math.min(s.quality + 3, 20); } // last resort: reduce quality
+    attempts++;
+  }
+  return s;
+}
 document.getElementById('setting-quality').addEventListener('input', function() {
   document.getElementById('quality-val').textContent = this.value;
+  updateSizePreview();
 });
+
+// Update size preview on any setting change
+['setting-duration', 'setting-fps', 'setting-width'].forEach(function(id) {
+  document.getElementById(id).addEventListener('change', updateSizePreview);
+});
+
+function updateSizePreview() {
+  var s = getSettings();
+  var bytes = estimateSize(s);
+  var mb = bytes / (1024 * 1024);
+  var pct = Math.min((mb / 50) * 100, 100);
+
+  var valEl  = document.getElementById('size-preview-val');
+  var barEl  = document.getElementById('size-bar-fill');
+
+  valEl.textContent = mb.toFixed(1) + ' MB';
+  barEl.style.width = pct + '%';
+
+  // Colour thresholds: green < 35MB, amber 35–50MB, red > 50MB
+  var state = mb < 35 ? 'ok' : mb < 50 ? 'warn' : 'over';
+  valEl.className  = 'size-preview-val'  + (state !== 'ok' ? ' ' + state : '');
+  barEl.className  = 'size-bar-fill'     + (state !== 'ok' ? ' ' + state : '');
+}
+
+// Run once on load to show initial estimate
+updateSizePreview();
 
 // ─── Input handling ────────────────────────────────────────────────────────
 urlInput.addEventListener('input', function() {
@@ -428,22 +530,49 @@ async function processItem(id) {
   var mp4url = await fetchMP4(item.url);
   if (!mp4url) { setStatus(id, 'error', 'Failed to fetch video'); return; }
 
-  // 2. Capture frames
-  setStatus(id, 'capturing', 'Capturing frames…');
+  // 2. Check settings and auto-reduce if needed
   var settings = getSettings();
-  var frames = await captureFrames(mp4url, settings);
+  var fitted = fitSettings(settings);
+  var wasReduced = (fitted.fps !== settings.fps || fitted.width !== settings.width || fitted.duration !== settings.duration);
+  if (wasReduced) {
+    showToast('Settings auto-adjusted to stay under 50MB: ' + fitted.width + 'px / ' + fitted.fps + 'fps / ' + fitted.duration + 's', 'info');
+    updateSettingsUI(fitted);
+  }
+
+  // 3. Capture frames
+  setStatus(id, 'capturing', 'Capturing frames… (' + fitted.duration + 's @ ' + fitted.fps + 'fps)');
+  var frames = await captureFrames(mp4url, fitted);
   if (!frames || frames.length === 0) { setStatus(id, 'error', 'Failed to capture frames'); return; }
 
-  // 3. Encode GIF
+  // 4. Encode GIF
   setStatus(id, 'encoding', 'Encoding GIF… (0%)');
-  var blob = await encodeGIF(id, frames, settings);
+  var blob = await encodeGIF(id, frames, fitted);
   if (!blob) { setStatus(id, 'error', 'GIF encoding failed'); return; }
 
-  // 4. Done
+  // 5. Final size check — if still over 50MB re-encode at lower quality
+  if (blob.size > MAX_SIZE_BYTES) {
+    setStatus(id, 'encoding', 'Too large, re-encoding…');
+    fitted.quality = Math.min(fitted.quality + 5, 20);
+    fitted.fps = Math.max(fitted.fps - 2, 6);
+    blob = await encodeGIF(id, frames, fitted);
+  }
+
+  // 6. Done
   item.gifBlob = blob;
-  setStatus(id, 'done', 'Ready — ' + formatBytes(blob.size));
+  var sizeStr = formatBytes(blob.size);
+  var overLimit = blob.size > MAX_SIZE_BYTES;
+  setStatus(id, overLimit ? 'error' : 'done', overLimit ? 'Still over 50MB (' + sizeStr + ')' : 'Ready — ' + sizeStr);
   showPreview(id, blob);
-  enableDownload(id);
+  if (!overLimit) enableDownload(id);
+  else showToast('Could not reduce ' + item.handle + ' below 50MB. Try lower duration or FPS.', 'error');
+}
+
+function updateSettingsUI(s) {
+  document.getElementById('setting-fps').value = s.fps;
+  document.getElementById('setting-width').value = s.width;
+  document.getElementById('setting-duration').value = s.duration;
+  document.getElementById('setting-quality').value = s.quality;
+  document.getElementById('quality-val').textContent = s.quality;
 }
 
 // ─── Fetch MP4 URL ─────────────────────────────────────────────────────────
