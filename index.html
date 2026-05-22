@@ -378,8 +378,7 @@ body::before {
 <script>
 // ─── State ────────────────────────────────────────────────────────────────
 var items = [];  // { id, url, handle, videoId, status, gifBlob, error }
-var pendingDownloads = [];  // blobs queued to download
-var autoDownloadInterval = null;
+
 
 // ─── Elements ─────────────────────────────────────────────────────────────
 var urlInput  = document.getElementById('url-input');
@@ -474,22 +473,7 @@ loadBtn.addEventListener('click', function() {
   var urls = parseURLs();
   if (!urls.length) return;
   loadBtn.disabled = true;
-  pendingDownloads = [];
   startBatch(urls);
-  // Start a pump that drains pendingDownloads every 800ms
-  // This runs within the trusted click thread context via interval
-  clearInterval(autoDownloadInterval);
-  autoDownloadInterval = setInterval(function() {
-    if (pendingDownloads.length > 0) {
-      var next = pendingDownloads.shift();
-      var a = document.createElement('a');
-      a.href = next.url;
-      a.download = next.filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-    }
-  }, 800);
 });
 
 function parseURLs() {
@@ -515,10 +499,25 @@ async function processQueue(startId, count) {
   for (var i = 0; i < count; i++) {
     var id = startId + i;
     await processItem(id);
+    // Trigger download immediately after each item — still within async chain of click
+    var item = items[id];
+    if (item.gifBlob) {
+      triggerBlobDownload(item.gifBlob, item.handle + '.gif');
+    }
   }
   showToast('All done! ' + count + ' GIF' + (count !== 1 ? 's' : '') + ' converted', 'success');
-  // Stop the pump after a delay to let the last download flush
-  setTimeout(function() { clearInterval(autoDownloadInterval); }, 5000);
+}
+
+function triggerBlobDownload(blob, filename) {
+  var blobUrl = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function() { URL.revokeObjectURL(blobUrl); }, 10000);
 }
 
 // ─── Single item pipeline ─────────────────────────────────────────────────
@@ -743,11 +742,6 @@ function enableDownload(id) {
   if (!actions) return;
   var filename = item.handle + '.gif';
   var blobUrl = URL.createObjectURL(item.gifBlob);
-
-  // Queue for auto-download via the interval pump
-  pendingDownloads.push({ url: blobUrl, filename: filename });
-
-  // Show manual fallback button
   actions.innerHTML =
     '<a class="dl-btn dl-btn-gif" href="' + blobUrl + '" download="' + filename + '">' +
       '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>' +
